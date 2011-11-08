@@ -37,7 +37,6 @@
  </ul>
  
  @author Localytics
- @version 2.0
  */
 @interface LocalyticsSession : NSObject {
 
@@ -197,5 +196,17 @@
  will just get uploaded the next time the app comes up.
  */
 - (void)upload;
+
+/*!
+ @method setCustomDimension
+ @abstract (ENTERPRISE ONLY) Sets the value of a custom dimension. Custom dimensions are dimensions
+ which contain user defined data unlike the predefined dimensions such as carrier, model, and country.
+ Once a value for a custom dimension is set, the device it was set on will continue to upload that value
+ until the value is changed. To clear a value pass nil as the value. 
+ The proper use of custom dimensions involves defining a dimension with less than ten distinct possible
+ values and assigning it to one of the four available custom dimensions. Once assigned this definition should
+ never be changed without changing the App Key otherwise old installs of the application will pollute new data.
+ */
+- (void)setCustomDimension:(int)dimension value:(NSString *)value;
 
 @end

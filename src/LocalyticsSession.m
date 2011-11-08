@@ -15,13 +15,18 @@
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
+#include <sys/socket.h>
+#include <net/if_dl.h>
+#include <ifaddrs.h>
 #include <CommonCrypto/CommonDigest.h>
 
 #pragma mark Constants
-#define CLIENT_VERSION              @"iOS_2.3"      // The version of this library
+#define PREFERENCES_KEY             @"_localytics_install_id" // The randomly generated ID for each install of the app
+#define CLIENT_VERSION              @"iOS_2.5"      // The version of this library
 #define LOCALYTICS_DIR              @".localytics"	// The directory in which the Localytics database is stored
 #define MAX_DATABASE_SIZE           500000          // The maximum allowed disk size of the primary database file at open, in bytes
-
+#define MAX_STORED_EVENTS           1000            // The maximum alowed events to be stored in the database.
+#define IFT_ETHER                   0x6             // Ethernet CSMACD
 #define PATH_TO_APT                 @"/private/var/lib/apt/"
 
 #define DEFAULT_BACKGROUND_SESSION_TIMEOUT 15   // Default value for how many seconds a session persists when App shifts to the background.
@@ -51,9 +56,14 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 - (void)addFlowEventWithName:(NSString *)name type:(NSString *)eventType;
 - (void)addScreenWithName:(NSString *)name;
 - (BOOL)saveApplicationFlowAndRemoveOnResume:(BOOL)removeOnResume;
+- (NSString *)customDimensions;
+- (NSString *)hashString:(NSString *)input;
+- (NSString *)macAddress;
 - (NSString *)formatAttributeWithName:(NSString *)paramName value:(NSString *)paramValue first:(BOOL)firstAttribute;
+- (NSString *)formatAttributeWithName:(NSString *)paramName value:(NSString *)paramValue;
 - (NSString *)escapeString:(NSString *)input;
-- (NSString *)getGlobalDeviceId;
+- (NSString *)uniqueDeviceIdentifier;
+- (NSString *) installationId;
 - (NSString *)getAppVersion;
 - (NSTimeInterval)getTimestamp;
 - (BOOL)isDeviceJailbroken;
@@ -157,14 +167,11 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 		return;
 	}
 
-	@try {        
-		self.isSessionOpen = YES;
-        self.sessionHasBeenOpen = YES;
-
+	@try {
 		// If there is too much data on the disk, don't bother collecting any more.
         LocalyticsDatabase *db = [LocalyticsDatabase sharedLocalyticsDatabase];
-		if ([db databaseSize] >= MAX_DATABASE_SIZE) {
-			[self logMessage:@"Maximum amount of data has been queued to disk."];
+        if([db eventCount] >= MAX_STORED_EVENTS) {
+			[self logMessage:@"Maximum number of events stored in database. Session not opened."];
 			self.isSessionOpen = NO;
 			return;
 		}
@@ -199,16 +206,23 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
             NSMutableString *openEventString = [NSMutableString string];
             [openEventString appendString:@"{"];
             [openEventString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE              value:@"s"              first:YES]];
-            [openEventString appendString:[self formatAttributeWithName:PARAM_NEW_SESSION_UUID           value:self.sessionUUID  first:NO]];
+            [openEventString appendString:[self formatAttributeWithName:PARAM_NEW_SESSION_UUID           value:self.sessionUUID]];
             [openEventString appendFormat:@",\"%@\":%u", PARAM_CLIENT_TIME, (long)self.lastSessionStartTimestamp];
-            [openEventString appendFormat:@",\"%@\":%d", PARAM_SESSION_NUMBER, sessionNumber];
+            [openEventString appendFormat:@",\"%@\":%d", PARAM_SESSION_NUMBER, sessionNumber];            
+            
+            [openEventString appendString:[self customDimensions]];
+            
             [openEventString appendString:@"}\n"];
-
+            
+            [self customDimensions];
+            
             success = [db addEventWithBlobString:[[openEventString copy] autorelease]];
         }
         
         if (success) {
             [db releaseTransaction:t];
+            self.isSessionOpen = YES;
+            self.sessionHasBeenOpen = YES;
             [self logMessage:[@"Succesfully opened session. UUID is: " stringByAppendingString:self.sessionUUID]];
         } else {
             [db rollbackTransaction:t];
@@ -233,9 +247,16 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
   if(self.sessionHasBeenOpen &&
      (!self.sessionCloseTime ||
       [self.sessionCloseTime timeIntervalSinceNow]*-1 <= self.backgroundSessionTimeout)) {
-    [self reopenPreviousSession];
+         // Note that we allow the session to be resumed even if the database size exceeds the
+         // maximum. This is because we don't want to create incomplete sessions. If the DB was large
+         // enough that the previous session could not be opened, there will be nothing to resume. But 
+         // if this session caused it to go over it is better to let it complete and stop the next one
+         // from being created.
+         [self logMessage:@"Resume called - Resuming previous session."];
+         [self reopenPreviousSession];
   } else {
     // otherwise open new session and upload
+    [self logMessage:@"Resume called - Opening a new session."];
     [self open];
   }
   self.sessionCloseTime = nil;
@@ -262,8 +283,8 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 		NSMutableString *closeEventString = [NSMutableString string];
         [closeEventString appendString:@"{"];
         [closeEventString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE         value:@"c"                      first:YES]];
-		[closeEventString appendString:[self formatAttributeWithName:PARAM_SESSION_UUID      value:self.sessionUUID          first:NO]];
-        [closeEventString appendString:[self formatAttributeWithName:PARAM_UUID              value:[self getRandomUUID]      first:NO]];
+		[closeEventString appendString:[self formatAttributeWithName:PARAM_SESSION_UUID      value:self.sessionUUID]];
+        [closeEventString appendString:[self formatAttributeWithName:PARAM_UUID              value:[self getRandomUUID] ]];
         [closeEventString appendFormat:@",\"%@\":%u", PARAM_SESSION_START, (long)self.lastSessionStartTimestamp];
         [closeEventString appendFormat:@",\"%@\":%u", PARAM_SESSION_ACTIVE, (long)self.sessionActiveDuration];
         [closeEventString appendFormat:@",\"%@\":%u", PARAM_CLIENT_TIME, (long)[self getTimestamp]];
@@ -279,6 +300,9 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 
         // Close second level - screen flow
         [closeEventString appendString:@"]"];
+
+        // Append the custom dimensions
+        [closeEventString appendString:[self customDimensions]];
         
         // Close first level - close blob 
         [closeEventString appendString:@"}\n"];
@@ -374,12 +398,15 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 		NSMutableString *eventString = [[[NSMutableString alloc] init] autorelease];
         [eventString appendString:@"{"];
         [eventString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE     value:@"e"                      first:YES]];
-		[eventString appendString:[self formatAttributeWithName:PARAM_UUID          value:[self getRandomUUID]      first:NO]];
-		[eventString appendString:[self formatAttributeWithName:PARAM_APP_KEY       value:self.applicationKey       first:NO]];
-		[eventString appendString:[self formatAttributeWithName:PARAM_SESSION_UUID  value:self.sessionUUID          first:NO]];
-		[eventString appendString:[self formatAttributeWithName:PARAM_EVENT_NAME    value:[self escapeString:event] first:NO]];
+		[eventString appendString:[self formatAttributeWithName:PARAM_UUID          value:[self getRandomUUID] ]];
+		[eventString appendString:[self formatAttributeWithName:PARAM_APP_KEY       value:self.applicationKey  ]];
+		[eventString appendString:[self formatAttributeWithName:PARAM_SESSION_UUID  value:self.sessionUUID     ]];
+		[eventString appendString:[self formatAttributeWithName:PARAM_EVENT_NAME    value:[self escapeString:event] ]];
         [eventString appendFormat:@",\"%@\":%u", PARAM_CLIENT_TIME, (long)[self getTimestamp]];
 
+        // Append the custom dimensions
+        [eventString appendString:[self customDimensions]];
+        
 		// If there are any attributes for this event, add them as a hash
         int attrIndex = 0;
 		if(attributes != nil)
@@ -451,6 +478,17 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
     [self logMessage:[@"Tagged screen: " stringByAppendingString:screenName]];
 }
 
+- (void)setCustomDimension:(int)dimension value:(NSString *)value {
+    if(dimension < 0 || dimension > 3) {
+        [self logMessage:@"Only valid dimensions are 0 - 3"];
+        return;
+    }
+    
+    if(false == [[LocalyticsDatabase sharedLocalyticsDatabase] setCustomDimension:dimension value:value]) {
+        [self logMessage:@"Unable to set custom dimensions."];
+    }
+}
+
 /*
  @method saveApplicationFlowAndRemoveOnResume:
  @abstract Constructs an application flow blob string and writes it to the database, optionally flagging it for deletion
@@ -470,7 +508,7 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
         // Open first level - flow blob event
         [flowEventString appendString:@"{"];
         [flowEventString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE value:@"f"                  first:YES]];
-        [flowEventString appendString:[self formatAttributeWithName:PARAM_UUID      value:[self getRandomUUID]  first:NO]];
+        [flowEventString appendString:[self formatAttributeWithName:PARAM_UUID      value:[self getRandomUUID] ]];
         [flowEventString appendFormat:@",\"%@\":%u", PARAM_SESSION_START, (long)self.lastSessionStartTimestamp];
         
         // Open second level - new flow events
@@ -553,7 +591,7 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
             }
         }
 	}
-	@catch (NSException * e) {}
+	@catch (NSException * e) { }
 }
 
 #pragma mark Private Methods
@@ -632,57 +670,38 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
     NSString *device_language = [english displayNameForKey:NSLocaleIdentifier value:device_locale];
 	NSString *locale_country = [english displayNameForKey:NSLocaleCountryCode value:[locale objectForKey:NSLocaleCountryCode]];
     NSString *uuid = [self getRandomUUID];
-    NSString *installId = [[LocalyticsDatabase sharedLocalyticsDatabase] installId];
+    NSString *device_uuid = [self uniqueDeviceIdentifier];
 
-    NSString *device_uuid = [self getGlobalDeviceId];
-    NSData *stringBytes = [device_uuid dataUsingEncoding: NSUTF8StringEncoding];        
-    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
-    
     // Open first level - blob information
     [headerString appendString:@"{"];
     [headerString appendFormat:@"\"%@\":%d", PARAM_SEQUENCE_NUMBER, nextSequenceNumber];
     [headerString appendFormat:@",\"%@\":%u", PARAM_PERSISTED_AT, (long)[[LocalyticsDatabase sharedLocalyticsDatabase] createdTimestamp]];
-    [headerString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE    value:@"h"      first:NO]];
-    [headerString appendString:[self formatAttributeWithName:PARAM_UUID         value:uuid    first:NO]];
+    [headerString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE    value:@"h" ]];
+    [headerString appendString:[self formatAttributeWithName:PARAM_UUID         value:uuid ]];
 
     // Open second level - blob header attributes
     [headerString appendString:[NSString stringWithFormat:@",\"%@\":{", PARAM_ATTRIBUTES]];
     [headerString appendString:[self formatAttributeWithName:PARAM_DATA_TYPE    value:@"a"  first:YES]];
     
 	// >>  Application and session information
-    [headerString appendString:[self formatAttributeWithName:PARAM_INSTALL_ID       value:installId first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_APP_KEY          value:self.applicationKey          first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_APP_VERSION      value:[self getAppVersion]         first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_LIBRARY_VERSION  value:CLIENT_VERSION               first:NO]];
-
-	// >>  Device UUID. 
-	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_UUID          value:device_uuid first:NO]];
-    if (CC_SHA1([stringBytes bytes], [stringBytes length], digest)) {
-        NSMutableString* hashedUUID = [NSMutableString stringWithCapacity:CC_SHA1_DIGEST_LENGTH * 2];
-        for(int i = 0; i < CC_SHA1_DIGEST_LENGTH; i++) {
-            [hashedUUID appendFormat:@"%02x", digest[i]];
-        }        
-        [headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_UUID_HASHED   value:hashedUUID  first:NO]];
-    }
+    [headerString appendString:[self formatAttributeWithName:PARAM_INSTALL_ID       value:[self installationId] ]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_APP_KEY          value:self.applicationKey   ]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_APP_VERSION      value:[self getAppVersion]  ]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_LIBRARY_VERSION  value:CLIENT_VERSION        ]];
      
-    // >>  Other Device Information
-	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_PLATFORM      value:[thisDevice model]         first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_OS_VERSION    value:[thisDevice systemVersion] first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_MODEL         value:[self getDeviceModel]      first:NO]];
+    // >>  Device Information
+	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_UUID          value:device_uuid ]];
+    [headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_UUID_HASHED   value:[self hashString:device_uuid] ]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_PLATFORM      value:[thisDevice model]            ]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_OS_VERSION    value:[thisDevice systemVersion]    ]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_MODEL         value:[self getDeviceModel]         ]];
 
-	[headerString appendString:[NSString stringWithFormat:@",\"%@\":%d", PARAM_DEVICE_MEMORY, (long)[self availableMemory]]];
-	
-	[headerString appendString:[self formatAttributeWithName:PARAM_LOCALE_LANGUAGE   value:device_language                            first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_LOCALE_COUNTRY    value:locale_country                             first:NO]];
-	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_COUNTRY    value:[locale objectForKey:NSLocaleCountryCode]  first:NO]];
-    
-    // TODO: Several data points are missing from the blob header:
-    //  PARAM_DATA_CONNECTION (Never used on iPhone?)
-    //  PARAM_NETWORK_COUNTRY (Never used on iPhone?)
-    //  PARAM_DATA_CONNECTION (never used on iPhone?)
-    //  LATITUDE (not sending?)
-    //  LONGITUDE (not sending?)
-
+// MAC Address collection. Uncomment the following line to add Mac address to the mix of collected identifiers
+//    [headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_MAC value:[self hashString:[self macAddress]]     ]];    
+	[headerString appendString:[NSString stringWithFormat:@",\"%@\":%d", PARAM_DEVICE_MEMORY, (long)[self availableMemory]  ]];	
+	[headerString appendString:[self formatAttributeWithName:PARAM_LOCALE_LANGUAGE   value:device_language]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_LOCALE_COUNTRY    value:locale_country]];
+	[headerString appendString:[self formatAttributeWithName:PARAM_DEVICE_COUNTRY    value:[locale objectForKey:NSLocaleCountryCode]]];
 	[headerString appendString:[NSString stringWithFormat:@",\"%@\":%@", PARAM_JAILBROKEN, [self isDeviceJailbroken] ? @"true" : @"false"]];
     
     //  Close second level - attributes
@@ -720,11 +739,93 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 - (void)logMessage:(NSString *)message
 {
     if(DO_LOCALYTICS_LOGGING) {
-        printf("(localytics) %s\n", [message UTF8String]);
+        NSLog(@"(localytics) %s\n", [message UTF8String]);
     }
 }
 
 #pragma mark Datapoint Functions
+/*!
+ @method customDimensions
+ @abstract Returns the json blob containing the custom dimensions. Assumes this will be appended
+ to an existing blob and as a result prepends the results with a comma.
+ */
+- (NSString *)customDimensions
+{
+    NSMutableString *dimensions = [[[NSMutableString alloc] init] autorelease];
+    
+    for(int i=0; i <4; i++) {
+        NSString *dimension = [[LocalyticsDatabase sharedLocalyticsDatabase] customDimension:i];
+        if(dimension) {
+            [dimensions appendFormat:@",\"c%i\":\"%@\"", i, dimension];
+        }            
+    }
+    
+    return [[dimensions copy] autorelease];
+}
+
+/*!
+ @method macAddress
+ @abstract Returns the macAddress of this device.
+ */
+- (NSString *)macAddress
+{
+    NSMutableString* result = [NSMutableString string];
+    
+    BOOL success;
+    struct ifaddrs* addrs;
+    const struct ifaddrs* cursor;
+    const struct sockaddr_dl* dlAddr;
+    const uint8_t * base;
+    int i;
+    
+    success = (getifaddrs(&addrs) == 0);
+    if(success)
+    {
+        cursor = addrs;
+        while(cursor != NULL)
+        {
+            if((cursor->ifa_addr->sa_family == AF_LINK) && (((const struct sockaddr_dl *) cursor->ifa_addr)->sdl_type == IFT_ETHER))
+            {
+                dlAddr = (const struct sockaddr_dl *) cursor->ifa_addr;                
+                base = (const uint8_t *) &dlAddr->sdl_data[dlAddr->sdl_nlen];
+                
+                for(i=0; i<dlAddr->sdl_alen; i++) 
+                {
+                    if(i != 0) {
+                        [result appendString:@":"];
+                    }
+                    [result appendFormat:@"%02x", base[i]];
+                }
+                break;
+            }
+            cursor = cursor->ifa_next;
+        }
+        freeifaddrs(addrs);
+    }
+    
+    return result;
+}
+
+/*!
+ @method hashString
+ @abstract SHA1 Hashes a string
+ */
+- (NSString *)hashString:(NSString *)input
+{
+    NSData *stringBytes = [input dataUsingEncoding: NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    
+    if (CC_SHA1([stringBytes bytes], [stringBytes length], digest)) {
+        NSMutableString* hashedUUID = [NSMutableString stringWithCapacity:CC_SHA1_DIGEST_LENGTH * 2];
+        for(int i = 0; i < CC_SHA1_DIGEST_LENGTH; i++) {
+            [hashedUUID appendFormat:@"%02x", digest[i]];
+        }
+        return hashedUUID;
+    }
+    
+    return nil;
+}
+
 /*!
  @method getRandomUUID
  @abstract Generates a random UUID
@@ -761,6 +862,12 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 	return [[formattedString copy] autorelease];
 }
 
+// Convenience method for formatAttributeWithName which sets firstAttribute to NO since
+// this is the most common way to call it.
+- (NSString *)formatAttributeWithName:(NSString *)paramName value:(NSString *)paramValue {
+    return [self formatAttributeWithName:paramName value:paramValue first:NO];
+}
+
 /*!
  @method escapeString
  @abstract Formats the input string so it fits nicely in a JSON document.  This includes
@@ -776,17 +883,54 @@ static LocalyticsSession *_sharedLocalyticsSession = nil;
 }
 
 /*!
- @method getGlobalDeviceId
+ @method installationId
+ @abstract Looks in user preferences for an ID unique to this installation. If one is not
+ found it checks if one happens to be in the database (carroyover from older version of the db)
+ if not, it generates one.
+ @return A string uniquely identifying this installation of this app
+ */
+- (NSString *) installationId {
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    NSString *installId = [prefs stringForKey:PREFERENCES_KEY];
+    
+    if(installId == nil)
+    {
+        [self logMessage:@"Install ID not found in preferences, checking DB"];
+        installId = [[LocalyticsDatabase sharedLocalyticsDatabase] installId];
+    }
+    
+    // If it hasn't been found yet, generate a new one.
+    if(installId == nil)
+    {
+        [self logMessage:@"Install ID not find one in database, generating a new one."];
+        installId = [self getRandomUUID];
+    }
+
+    // Store the newly generated installId
+    [prefs setObject:installId forKey:PREFERENCES_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+ 
+    return installId;
+}
+
+/*!
+ @method uniqueDeviceIdentifier
  @abstract A unique device identifier is a hash value composed from various hardware identifiers such
  as the device’s serial number. It is guaranteed to be unique for every device but cannot 
  be tied to a user account. [UIDevice Class Reference]
  @return An 1-way hashed identifier unique to this device.
  */
-- (NSString *)getGlobalDeviceId {
+- (NSString *)uniqueDeviceIdentifier {
+
+// Supress the warning for uniqueIdentifier being deprecated.
+// We collect it as long as it is available along with a randomly generated ID.
+// This way, when this becomes unavailable we can map existing users so the
+// new vs returning counts do not break. This will be removed before it causes grief.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 	NSString *systemId = [[UIDevice currentDevice] uniqueIdentifier];
-	if (systemId == nil) {
-		return nil;
-	}
+#pragma clang diagnostic pop    
+    
 	return systemId;
 }
 

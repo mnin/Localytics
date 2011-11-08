@@ -18,6 +18,7 @@
 + (LocalyticsDatabase *)sharedLocalyticsDatabase;
 
 - (NSUInteger)databaseSize;
+- (int) eventCount;
 - (NSTimeInterval)createdTimestamp;
 
 - (BOOL)beginTransaction:(NSString *)name;
@@ -44,5 +45,8 @@
 - (BOOL)isOptedOut;
 - (BOOL)setOptedOut:(BOOL)optOut;
 - (NSString *) installId;
+
+- (NSString *)customDimension:(int)dimension;
+- (BOOL)setCustomDimension:(int)dimension value:(NSString *)value;
 
 @end

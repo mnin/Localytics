@@ -16,7 +16,6 @@
     - (int)schemaVersion;
     - (void)createSchema;
     - (void)upgradeToSchemaV2;
-    - (NSString *)getRandomUUID;
     - (void)moveDbToCaches;
 @end
 
@@ -137,13 +136,13 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
 
 - (NSString *) installId {
     [_dbLock lock];
-
+    
     NSString *installId = nil;
     
     sqlite3_stmt *selectInstallId;
     sqlite3_prepare_v2(_databaseConnection, "SELECT install_id FROM localytics_info", -1, &selectInstallId, NULL);
     int code = sqlite3_step(selectInstallId);
-    if (code == SQLITE_ROW) {                
+    if (code == SQLITE_ROW && sqlite3_column_text(selectInstallId, 0)) {                
         installId = [NSString stringWithUTF8String:(char *)sqlite3_column_text(selectInstallId, 0)];
     }
     sqlite3_finalize(selectInstallId);
@@ -222,15 +221,10 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
     }
 
     if (code == SQLITE_OK) {
-        sqlite3_stmt *insertInfo;
-        sqlite3_prepare_v2(_databaseConnection, "INSERT INTO localytics_info (schema_version, last_upload_number, last_session_number, opt_out, install_id) "
-                           "VALUES (2, 0, 0, 0, ?)", 
-                           -1, 
-                           &insertInfo, 
-                           NULL);
-        sqlite3_bind_text (insertInfo, 1, [[self getRandomUUID] UTF8String], -1, SQLITE_TRANSIENT); 
-        code = sqlite3_step(insertInfo);    
-        sqlite3_finalize(insertInfo);        
+        code = sqlite3_exec(_databaseConnection,
+                            "INSERT INTO localytics_info (schema_version, last_upload_number, last_session_number, opt_out) "
+                            "VALUES (2, 0, 0, 0)",
+                            NULL, NULL, NULL);
     }
 
     // Commit transaction.
@@ -244,6 +238,7 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
 }
 
 // V2 adds a unique identifier for each installation
+// This identifier has been moved to user preferences so the database an live in the caches directory
 // Also adds storage for custom dimensions
 - (void)upgradeToSchemaV2 {
     int code = SQLITE_OK;
@@ -281,15 +276,7 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
                             "ALTER TABLE localytics_info ADD custom_d3 CHAR(64)",
                             NULL, NULL, NULL);
     }
-    
-    if (code == SQLITE_OK) {
-        sqlite3_stmt *updateInstallId;
-        sqlite3_prepare_v2(_databaseConnection, "UPDATE localytics_info set install_id = ?, schema_version = 2 ", -1, &updateInstallId, NULL);
-        sqlite3_bind_text (updateInstallId, 1, [[self getRandomUUID] UTF8String], -1, SQLITE_TRANSIENT); 
-        code = sqlite3_step(updateInstallId);    
-        sqlite3_finalize(updateInstallId);
-    }
-    
+        
     // Commit transaction.
     if (code == SQLITE_OK || code == SQLITE_DONE) {
         sqlite3_exec(_databaseConnection, "COMMIT", NULL, NULL, NULL);
@@ -307,6 +294,24 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
                                     error:nil];
     size = [fileAttributes fileSize];
     return size;
+}
+
+- (int) eventCount {
+    [_dbLock lock];
+    int count = 0;
+    const char *sql = "SELECT count(*) FROM events";
+    sqlite3_stmt *selectEventCount;
+    
+    if(sqlite3_prepare_v2(_databaseConnection, sql, -1, &selectEventCount, NULL) == SQLITE_OK) 
+    {
+        if(sqlite3_step(selectEventCount) == SQLITE_ROW) {
+            count = sqlite3_column_int(selectEventCount, 0);
+        }
+    }
+    sqlite3_finalize(selectEventCount);
+    [_dbLock unlock];
+    
+    return count;
 }
 
 - (NSTimeInterval)createdTimestamp {
@@ -379,6 +384,43 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
     
     [_dbLock unlock];
     
+    return code == SQLITE_OK;
+}
+
+- (NSString *)customDimension:(int)dimension {
+    if(dimension < 0 || dimension > 3) {
+        return nil;
+    }
+    
+    NSString *value = nil;
+    NSString *query = [NSString stringWithFormat:@"select custom_d%i from localytics_info", dimension];
+    
+    [_dbLock lock];
+    sqlite3_stmt *selectCustomDim;
+    sqlite3_prepare_v2(_databaseConnection, [query UTF8String], -1, &selectCustomDim, NULL);
+    int code = sqlite3_step(selectCustomDim);
+    if (code == SQLITE_ROW && sqlite3_column_text(selectCustomDim, 0)) {
+        value = [NSString stringWithUTF8String:(char *)sqlite3_column_text(selectCustomDim, 0)];
+    }
+    sqlite3_finalize(selectCustomDim);
+    [_dbLock unlock];
+
+    return value;
+}
+
+- (BOOL)setCustomDimension:(int)dimension value:(NSString *)value {
+    if(dimension < 0 || dimension > 3) {
+        return false;
+    }
+    
+    NSString *query = [NSString stringWithFormat:@"update localytics_info SET custom_d%i = %@", 
+                         dimension,
+                         (value == nil) ? @"null" : [NSString stringWithFormat:@"\"%@\"", value]];
+    
+    [_dbLock lock];
+    int code = sqlite3_exec(_databaseConnection, [query UTF8String], NULL, NULL, NULL);
+    [_dbLock unlock];
+
     return code == SQLITE_OK;
 }
 
@@ -652,13 +694,6 @@ static LocalyticsDatabase *_sharedLocalyticsDatabase = nil;
     }
     
     return code == SQLITE_OK;
-}
-
-- (NSString *)getRandomUUID {
-	CFUUIDRef theUUID = CFUUIDCreate(NULL);
-	CFStringRef stringUUID = CFUUIDCreateString(NULL, theUUID);
-	CFRelease(theUUID);
-	return [(NSString *)stringUUID autorelease];
 }
 
 #pragma mark - Lifecycle
