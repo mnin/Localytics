@@ -6,7 +6,7 @@
 5. **[Instructions](#ten-minute-instrumentation-instructions)**
 6. **[Screen Lock](#screen-lock-optional)**
 7. **[Events (Optional)](#events-optional)**
-8. **[Screen Flows (Premium Feature)](#screen-flows-premium-feature))**
+8. **[Screen Flows (Premium Feature)](#screen-flows-premium-feature)**
 9. **[Sample Application Skeleton](#sample-application-skeleton)**
 10. **[Debugging No Data](#debugging-no-datatroubleshooting)**
 11. **[Deprecated Libraries](#deprecated-libraries)**
