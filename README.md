@@ -32,10 +32,13 @@ See this screenshot for an example.
 4. Copy the entire ‘src’ folder from the source package, which you downloaded in step 3 to your application’s project directory.
 5. Open your project in Xcode and right click on the project folder in the project navigator and select ‘Add files to <project name>’. Select all the files from the src folder (Step 4) and click Ok.
 6. In your application’s delegate file, the file whose default name is <YourApplication>AppDelegate.m, add the following line under any existing imports:
+
 ```objective-c
 #import "LocalyticsSession.h"
 ```
+
 7. In the same file, add the following line to the start of applicationDidFinishLaunching. This opens the session and causes an upload on app start. If you intend to track screen flow this has to happen before thew rootViewController is changed. In newer projects the function you are adding to may be called didFinishLaunchingWithOptions. If you do not have this, or any other application functions defined, simply create them from the definitions below:
+
 ```objective-c
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
@@ -48,22 +51,28 @@ self.window.rootViewController = self.viewController;
 return YES;
 }
 ```
+
 TIP: Once data is uploaded it cannot be deleted. Therefore it is recommended to create a test app in Localytics and use that while you perfect your instrumentation and then switch the app key for the production app.
 8. In the same file, add the following lines to the end of applicationDidEnterBackground. This closes the session when the app goes into the background and attempts an upload.
+
 ```objective-c
 - (void)applicationDidEnterBackground:(UIApplication *)application {
 [[LocalyticsSession sharedLocalyticsSession] close];
 [[LocalyticsSession sharedLocalyticsSession] upload];
 }
 ```
+
 9. In the same file, add the following lines to the end of applicationWillEnterForeground. This attempts to resume the previous session or create a new one if more than 15 seconds have passed and upload any data (nothing happens if data was successfully uploaded by the applicationDidEnterBackground call).
+
 ```objective-c
 - (void)applicationWillEnterForeground:(UIApplication *)application {
 [[LocalyticsSession sharedLocalyticsSession] resume];
 [[LocalyticsSession sharedLocalyticsSession] upload];
 }
 ```
+
 10. In the same file, add the following lines to ApplicationWillTerminate. Under normal circumstances this function will not be called but there are some cases where the OS will terminate the app.
+
 ```objective-c
 - (void)applicationWillTerminate:(UIApplication *)application {
 // Close Localytics Session
@@ -71,15 +80,18 @@ TIP: Once data is uploaded it cannot be deleted. Therefore it is recommended to 
 [[LocalyticsSession sharedLocalyticsSession] upload];
 }
 ```
+
 11. Add sqlite and libz if they are not already part of your project:
 Click on the project in the project navigator. This will bring up the project view.
 From here, select your target and then select the ‘Build Phases’ tab.
 Open the ‘Link Binaries with Libraries’ expander and click the’+’ button. Search for libz and select ‘libz.dylib’ (it may be in a folder) and click ‘add’.
 Repeat the above to search for libsqlite3 to add ‘libsqlite3.dylib’.
+
 12. Test your app. Launch the simulator (or even better, a real device), let the data upload, and view it on the webservice to make sure it is there. Remember that the upload is only guaranteed when the session is started so any events you tag may not appear until your second session.
 
 # Screen Lock (Optional)
 When the screen locks due to idle usage the app is not stopped. As a result, with the above integration time spent on a locked screen contributes to session length. When the screen locks applicationWillResignActive is called by the app delegate, and when the user returns applicationDidBecomeActive is called. In this calls the session can be closed and resumed. This way, if the screen is locked for more than 15 seconds the session is ended and a new session is created when the user comes back:
+
 ```objective-c
 - (void)applicationWillResignActive:(UIApplication *)application
 {
@@ -100,7 +112,9 @@ Anywhere in your application where an interesting event occurs you may tag it by
 ```objective-c
 [[LocalyticsSession sharedLocalyticsSession] tagEvent:@"Interesting Event"];
 ```
+
 where “Interesting Event” is a string describing the event. It is recommended that you read the Tagging section in the Developer’s Integration Guide in order to get the most value out of your tags. For some events, it may be interesting to collect additional data about the event. Such as how many lives the player has, or what the last action the user took was before clicking on an advertisement. This is accomplished with the second form of tagEvent, which takes a dictionary of key/value pairs along with the event name:
+
 ```objective-c
 NSDictionary *dictionary =
 [NSDictionary dictionaryWithObjectsAndKeys:
@@ -111,6 +125,7 @@ NSDictionary *dictionary =
 nil];
 [[LocalyticsSession sharedLocalyticsSession] tagEvent:@"Options saved" attributes:dictionary];
 ```
+
 See our introductory blog post for more information. It is recommended that you read the Event Attributes section in the Developer’s Integration Guide in order to get the most value out of your attributes.
 
 Important Note:
@@ -118,6 +133,7 @@ Make sure never to upload data from a continuous set or from user-generated valu
 
 # Screen Flows (Premium Feature)
 When a view is shown, it can be tagged so that all user flows through the application can be tracked. To do this, add a tagScreen call in the viewDidAppear call for each of your views. If your project doesn’t define this function, create it from the definition below. This should live in the view controller code. It is not recommended to append the name ‘screen’ to each screen as this is redundant when viewing the data online.
+
 ```objective-c
 - (void)viewDidAppear:(BOOL)animated
 {
@@ -127,6 +143,7 @@ When a view is shown, it can be tagged so that all user flows through the applic
 
 # Sample Application Skeleton
 To see it all at once, here is the skeleton of an instrumented iPhone application. Shown here is the Application’s AppDelegate.m file, because no other files need to be touched in the instrumentation process. (Although it is possible to add the event Tagging code to any file).
+
 ```objective-c
 SampleAppDelegate.m
 #import "Localytics_TestAppDelegate.h"
