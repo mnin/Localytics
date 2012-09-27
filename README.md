@@ -1,6 +1,6 @@
 # iOS Integration Guide for iPhone and iPad
 1. **[Upgrading](#upgrading)**
-2. **[Minimum Library Version](#all-apps-must-run-version-211-or-above)**
+2. **[Minimum Library Version](#all-apps-must-run-version-214-or-above)**
 3. **[UDID removed for iOS 6](#udid-removed-for-ios-6)**
 4. **[iOS ARC Support](#ios-arc-support)**
 5. **[Instructions](#ten-minute-instrumentation-instructions)**
@@ -12,13 +12,13 @@
 11. **[Deprecated Libraries](#deprecated-libraries)**
 
 ## Upgrading
-If you are upgrading from an older version of the SDK, simply replace the Localytics source files in your project with the ones you downloaded. If the version you are upgrading from did not use sqlite and libz, skip to step 11. If you get an error about an unrecognized selector it means you need to clean your project and rebuild.
+If you are upgrading from a 2.x version of the SDK, simply replace the Localytics source files in your project with the ones you downloaded and add the new AdSupport.framework (see step 11). If the version you are upgrading from did not use sqlite and libz, skip to step 11. If you get an error about an unrecognized selector it means you need to clean your project and rebuild.
 
-## All Apps Must Run Version 2.11 or Above
-All apps submitted to the App Store must be running the version 2.11 or greater of the Localytics iOS SDK to ensure they are approved by Apple. This library is fully compatible with iOS 6 and previous iOS versions. The target platform has to be at least iOS 4.
+## All Apps Must Run Version 2.14 or Above
+All new submissions to the App Store must be running the version 2.14 or greater of the Localytics iOS SDK to ensure they are approved by Apple and support the new advertisingIdentifier. This library is fully compatible with iOS 6 and previous iOS versions. The target platform has to be at least iOS 4.
 
 ## UDID Removed for iOS 6
-Localytics now uses the new identifierForAdvertising provided by Apple in iOS 6 to ensure that anonymous unique users, retention reports and other analysis are accurate and consistent for all iPhone and iPad apps. The Unique Device Identifier (UDID), which was deprecated but still available in iOS 5, is no longer used in iOS 6. This transition will be managed by Localytics to avoid the appearance of “new” users resulting from upgrades to iOS 6.
+Localytics now uses the new advertisingIdentifier provided by Apple in iOS 6 to help ensure that anonymous unique users, retention reports and other analyses are accurate and consistent for all iPhone and iPad apps. The Unique Device Identifier (UDID), which was deprecated but still available in iOS 5, is no longer used on iOS 6 devices. This transition will be managed by Localytics to avoid the appearance of “new” users resulting from the re-installation of your app.
 
 ## iOS ARC Support
 The Localytics library manages its own memory manually and is not configured for the new Automatic Reference Counting (ARC) capabilities of iOS 4 and later. It may be necessary to exclude the Localytics source from ARC by setting the -fno-objc-arc compiler flag in the Compile Sources for LocalyticsDatabase.m, LocalyticsSession.m and UploaderThread.m.
@@ -81,28 +81,37 @@ TIP: Once data is uploaded it cannot be deleted. Therefore it is recommended to 
 }
 ```
 
-11. Add sqlite and libz if they are not already part of your project:
+11. Add libsqlite3.dylib, libz.dylib and AdSupport.framework if they are not already part of your project:
 Click on the project in the project navigator. This will bring up the project view.
+
 From here, select your target and then select the ‘Build Phases’ tab.
+
 Open the ‘Link Binaries with Libraries’ expander and click the’+’ button. Search for libz and select ‘libz.dylib’ (it may be in a folder) and click ‘add’.
-Repeat the above to search for libsqlite3 to add ‘libsqlite3.dylib’.
+
+Click the ‘+’ button again and add ‘libsqlite3.dylib’.
+
+Optional: Click the ‘+’ button again and add ‘AdSupport.framework’. Note: AdSupport.framework is not required for Localytics integration. However, without this framework certain unique user-based reports will be less accurate
+
+If added, change the AdSupport.framework library from “Required” to “Optional”. This will provide backwards compatibility for pre-iOS 6 targets where the framework does not exist.
 
 12. Test your app. Launch the simulator (or even better, a real device), let the data upload, and view it on the webservice to make sure it is there. Remember that the upload is only guaranteed when the session is started so any events you tag may not appear until your second session.
+
 
 ## Screen Lock (Optional)
 When the screen locks due to idle usage the app is not stopped. As a result, with the above integration time spent on a locked screen contributes to session length. When the screen locks applicationWillResignActive is called by the app delegate, and when the user returns applicationDidBecomeActive is called. In this calls the session can be closed and resumed. This way, if the screen is locked for more than 15 seconds the session is ended and a new session is created when the user comes back:
 
+
 ```objective-c
 - (void)applicationWillResignActive:(UIApplication *)application
 {
-	[[LocalyticsSession sharedLocalyticsSession] close];
-	[[LocalyticsSession sharedLocalyticsSession] upload];
+    [[LocalyticsSession sharedLocalyticsSession] close];
+    [[LocalyticsSession sharedLocalyticsSession] upload];
 }
  
 - (void)applicationDidBecomeActive:(UIApplication *)application
 {
-	[[LocalyticsSession sharedLocalyticsSession] resume];
-	[[LocalyticsSession sharedLocalyticsSession] upload];
+    [[LocalyticsSession sharedLocalyticsSession] resume];
+    [[LocalyticsSession sharedLocalyticsSession] upload];
 }
 ```
 
@@ -113,11 +122,18 @@ Anywhere in your application where an interesting event occurs you may tag it by
 [[LocalyticsSession sharedLocalyticsSession] tagEvent:@"Interesting Event"];
 ```
 
-where “Interesting Event” is a string describing the event. It is recommended that you read the Tagging section in the Developer’s Integration Guide in order to get the most value out of your tags. For some events, it may be interesting to collect additional data about the event. Such as how many lives the player has, or what the last action the user took was before clicking on an advertisement. This is accomplished with the second form of tagEvent, which takes a dictionary of key/value pairs along with the event name:
+where “Interesting Event” is a string describing the event. It is recommended that you read the Tagging section in the Developer’s Integration Guide in order to get the most value out of your tags.
+
+For some events, it may be interesting to collect additional data about the event. Such as how many lives the player has, or what the last action the user took was before clicking on an advertisement. This is accomplished with the second form of tagEvent, which takes a dictionary of key/value pairs along with the event name:
 
 ```objective-c
 NSDictionary *dictionary =
-[NSDictionary dictionaryWithObjectsAndKeys:@"miles per hour", @"display units", @"yes", @"blank screen", nil];
+[NSDictionary dictionaryWithObjectsAndKeys:
+@"miles per hour",
+@"display units",
+@"yes",
+@"blank screen",
+nil];
 [[LocalyticsSession sharedLocalyticsSession] tagEvent:@"Options saved" attributes:dictionary];
 ```
 
@@ -146,14 +162,14 @@ SampleAppDelegate.m
  
 // Pre defined event text.
 #define EVENT_RESET_BUTTON @"RESET_BUTTON"
- 
+
 @implementation Localytics_TestAppDelegate
- 
+
 @synthesize window, viewController;
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 	[window addSubview:viewController.view];
 	[window makeKeyAndVisible];
- 
+
 	// Open Localytics Session
 	[[LocalyticsSession sharedLocalyticsSession] startSession:MY_APP_KEY];
 }
@@ -198,4 +214,4 @@ Here are some common steps for debugging instrumentation which does not appear i
 If you see the error: /LocalyticsSession.m:830: error: request for member ‘__forwarding’ in something not a structure or union change your compiler to be Apple LLVM compiler 3.1 or above.
 
 ## Deprecated Libraries
-Support for all libraries before version 2.0 has been deprecated and all customers are encouraged to upgrade to a more recent version of the libraries. New features may not be supported and and ongoing support for event and session tracking will be gradually decreased.
+Support for all libraries before version 2.13 has been deprecated and all customers are encouraged to upgrade to a more recent version of the libraries. New features may not be supported and and ongoing support for event and session tracking will be gradually decreased.
